@@ -1,0 +1,6 @@
+*.txt
+*.log
+*.bin
+*.idx
+./data/data-bin/*
+*.pyc
