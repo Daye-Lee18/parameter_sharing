@@ -2,6 +2,14 @@ import argparse
 
 def train_arg():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--input_dim", type=int, default=32000)
+    parser.add_argument("--output_dim", type=int, default=32000)
+    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--src_pad_idx", type=int, default=3)
+    parser.add_argument("--tgt_pad_idx", type=int, default=3)
+    parser.add_argument("--src_lang", type=str, default="en", help="source language")
+    parser.add_argument("--tgt_lang", type=str, default="de", help="target language")
     parser.add_argument("--data", type=str, default="data/data-bin/wmt16_en_de_bpe32k", help="WMT'16 data directory")
     parser.add_argument("--optimizer", default="adam")
     parser.add_argument("--adam-betas", default='(0.9, 0.98)')

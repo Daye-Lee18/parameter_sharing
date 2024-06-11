@@ -4,3 +4,6 @@
 *.idx
 ./data/data-bin/*
 *.pyc
+*/__pycache__/
+*.bpe
+*.json

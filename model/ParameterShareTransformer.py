@@ -1,9 +1,15 @@
 import torch
 import torch.nn as nn
 
+# https://github.com/takase/share_layer_params/blob/main/fairseq/fairseq/models/transformer.py#L275
+# TransformerEncoder(), ,,, code 참고 
+import torch
+import torch.nn as nn
+
 class Encoder(nn.TransformerEncoder):
     def __init__(
         self,
+        input_dim,
         d_model=512,
         nhead=16,
         dim_feedforward=2048,
@@ -13,9 +19,8 @@ class Encoder(nn.TransformerEncoder):
         num_total_layers=6,
         mode="cycle_rev",
         norm=False,
-    ):  
-        # https://github.com/takase/share_layer_params/blob/main/fairseq/fairseq/models/transformer.py#L275
-        # TransformerEncoder(), ,,, code 참고 
+        max_token=1000,
+    ):
         assert mode in {"sequence", "cycle", "cycle_rev"}
         quotient, remainder = divmod(num_total_layers, num_unique_layers)
         assert remainder == 0 
@@ -24,45 +29,91 @@ class Encoder(nn.TransformerEncoder):
             assert quotient == 2
 
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation
+            d_model, nhead, dim_feedforward, dropout, activation, batch_first=True
         )
-
         super().__init__(encoder_layer, num_layers=num_unique_layers, norm=norm)
         self.N = num_total_layers
         self.M = num_unique_layers
         self.mode = mode
         self.norm = nn.LayerNorm(d_model) if norm else None
-    
+        self.tok_embedding = nn.Embedding(input_dim, d_model)
+        self.pos_embedding = nn.Embedding(max_token, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.scale = torch.sqrt(torch.FloatTensor([d_model])).to(torch.device("cpu"))
+
+        print(f"Encoder structure: {self.layers}")
+        
     def forward(self, x, mask=None, src_key_padding_mask=None, verbose=False):
         """
         Input: 
-            - x (Tensor): input sequence embedding (bs, seq_len, d_model)
+            - x (Tensor): input sequence tensor (batch_size, seq_len)
             - mask (Optional[Tensor]): future token masking (seq_len, seq_len)
-            - src_key_padding_mask (Optional[Tensor]): indicating the padding token's positions with True value (bs, seq_len)
+            - src_key_padding_mask (Optional[Tensor]): indicating the padding token's positions with True value (batch_size, seq_len)
             - verbose (bool): for debugging
         
         Output:
             x (Tensor): encoded output (batch_size, seq_len, d_model)
         """
+        # Debugging print to check the shape and dtype of x
+        # print(f"Initial x shape: {x.shape}, dtype: {x.dtype}")
+        # print(f"Initial x max value: {x.max()}, x min value: {x.min()}")
+
+        # Ensure x is of type Long
+        x = x.long()
+
+        # # Check for NaN or Inf values
+        # if torch.any(torch.isnan(x)) or torch.any(torch.isinf(x)):
+        #     raise ValueError("Input x contains NaN or Inf values")
+
+        # # Ensure x values are within the range [0, input_dim-1]
+        # if torch.any(x >= self.tok_embedding.num_embeddings) or torch.any(x < 0):
+        #     print(x)
+        #     raise ValueError("Input x contains values out of range for tok_embedding")
+
+        # # Debugging print to check the shape and dtype of x after conversion
+        # print(f"Converted x shape: {x.shape}, dtype: {x.dtype}")
+        # print(f"Converted x max value: {x.max()}, x min value: {x.min()}")
+
+        # # Additional debug print before embedding
+        # try:
+        #     embedded_x = self.tok_embedding(x)
+        #     print(f"embedded_x shape: {embedded_x.shape}, dtype: {embedded_x.dtype}")
+        # except Exception as e:
+        #     print(f"Embedding error: {e}")
+        #     print(f"x max value: {x.max()}, x min value: {x.min()}")
+        #     raise
+
+        # Save original x
+        original_x = x.clone()
+
+        x_pos = torch.arange(0, original_x.size(1)).unsqueeze(0).repeat(original_x.size(0), 1).to(original_x.device)
+        self.scale = self.scale.to(original_x.device)
+
+        x = self.dropout((self.tok_embedding(original_x) * self.scale) + self.pos_embedding(x_pos))
+        
         for enc_i in range(self.N):
             if self.mode == "sequence":
                 enc_i = enc_i // (self.N // self.M)
             elif self.mode == "cycle":
                 enc_i = enc_i % self.M
             elif enc_i > (self.N - 1) / 2:
-                enc_i = self.N - i - 1
+                enc_i = self.N - enc_i - 1
             if verbose:
                 print(f"layer {enc_i}")
-            x = self.layers[enc_i](x, mask, src_key_padding_mask)
+
+
+            x = self.layers[enc_i](x)
+
         if self.norm is not None:
             x = self.norm(x)
         
         x = x.transpose(0, 1)  # Change back to (batch_size, seq_len, d_model)
-        return x               
+        return x
 
 class Decoder(nn.TransformerDecoder):
     def __init__(
         self,
+        output_dim,
         d_model=512,
         nhead=16,
         dim_feedforward=2048,
@@ -72,6 +123,7 @@ class Decoder(nn.TransformerDecoder):
         num_total_layers=6,
         mode="cycle_rev",
         norm=False,
+        max_token=1000,
     ):
         assert mode in {"sequence", "cycle", "cycle_rev"}
         quotient, remainder = divmod(num_total_layers, num_unique_layers)
@@ -81,31 +133,53 @@ class Decoder(nn.TransformerDecoder):
             assert quotient == 2
 
         decoder_layer = nn.TransformerDecoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation
+            d_model, nhead, dim_feedforward, dropout, activation, batch_first=True
         )
-
+        
         super().__init__(decoder_layer, num_layers=num_unique_layers, norm=norm)
         self.N = num_total_layers
         self.M = num_unique_layers
         self.mode = mode
         self.norm = nn.LayerNorm(d_model) if norm else None
+        self.tok_embedding = nn.Embedding(output_dim, d_model)
+        self.pos_embedding = nn.Embedding(max_token, d_model)
+        self.fc_out = nn.Linear(d_model, output_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.scale = torch.sqrt(torch.FloatTensor([d_model])).to(torch.device("cpu"))
+
+        print(f"Decoder structure: {self.layers}")
 
     def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
                 tgt_key_padding_mask=None, memory_key_padding_mask=None, verbose=False):
+        # Ensure tgt is of type Long
+        tgt = tgt.long()
 
-        """
-        Input: 
-            - tgt (Tensor): target sequence embedding (batch_size, tgt_len, d_model)
-            - memory (Tensor): encoder output ( batch_size, seq_len, d_model)
-            - tgt_mask (Optional[Tensor]): target sequence mask preventing the model from seeing the future (tgt_len, tgt_len)
-            - memory_mask (Optional[Tensor]): memory mask (tgt_len, seq_len)
-            - tgt_key_padding_mask (Optional[Tensor]): target padding mask (batch_size, tgt_len)
-            - memory_key_padding_mask (Optional[Tensor]): memory padding mask (batch_size, seq_len)
-            - verbose (bool): for debugging
+        # # Check for NaN or Inf values
+        # if torch.any(torch.isnan(tgt)) or torch.any(torch.isinf(tgt)):
+        #     raise ValueError("Input tgt contains NaN or Inf values")
+
+        # # Ensure tgt values are within the range [0, output_dim-1]
+        # if torch.any(tgt >= self.tok_embedding.num_embeddings) or torch.any(tgt < 0):
+        #     print(tgt)
+        #     raise ValueError("Input tgt contains values out of range for tok_embedding")
         
-        Output: 
-            - tgt (Tensor): decoded output for a target language (batch_size, tgt_len, d_model)
-        """
+        # # Debugging print to check the shape and dtype of tgt
+        # print(f"tgt shape: {tgt.shape}, dtype: {tgt.dtype}")
+        # print(f"tgt max value: {tgt.max()}, tgt min value: {tgt.min()}")
+
+        # # Additional debug print before embedding
+        # try:
+        #     embedded_tgt = self.tok_embedding(tgt)
+        #     print(f"embedded_tgt shape: {embedded_tgt.shape}, dtype: {embedded_tgt.dtype}")
+        # except Exception as e:
+        #     print(f"Embedding error: {e}")
+        #     print(f"tgt max value: {tgt.max()}, tgt min value: {tgt.min()}")
+        #     raise
+
+        tgt_pos = torch.arange(0, tgt.size(1)).unsqueeze(0).repeat(tgt.size(0), 1).to(tgt.device)
+        self.scale = self.scale.to(tgt.device)
+
+        tgt = self.dropout((self.tok_embedding(tgt) * self.scale) + self.pos_embedding(tgt_pos))
         
         for dec_i in range(self.N):
             if self.mode == "sequence":
@@ -116,63 +190,57 @@ class Decoder(nn.TransformerDecoder):
                 dec_i = self.N - dec_i - 1
             if verbose:
                 print(f"layer {dec_i}")
+
             tgt = self.layers[dec_i](tgt, memory, tgt_mask, memory_mask,
                                      tgt_key_padding_mask, memory_key_padding_mask)
         if self.norm is not None:
-            tgt = self.norm(tgt) 
+            tgt = self.norm(tgt)
 
         tgt = tgt.transpose(0, 1)  # Change back to (batch_size, tgt_len, d_model)
-        return tgt
+        output = self.fc_out(tgt)
+        return output
 
 class ParameterShareTransformer(nn.Module):
-    def __init__(
-        self,
-        d_model=512,
-        nhead=16,
-        num_encoder_layers=6,
-        num_decoder_layers=6,
-        dim_feedforward=2048,
-        dropout=0.1,
-        activation="relu",
-        num_unique_encoder_layers=3,
-        num_unique_decoder_layers=3,
-        mode="cycle_rev",
-    ):
+    def __init__(self, input_dim, output_dim, src_pad_idx, tgt_pad_idx, max_token, device, d_model=512, nhead=16, 
+                 dim_feedforward=2048, dropout=0.1, activation="relu", num_unique_layers=3, num_total_layers=6, 
+                 mode="cycle_rev", norm=False):
         super().__init__()
-        self.encoder = Encoder(
-            d_model, nhead, dim_feedforward, dropout, activation,
-            num_unique_encoder_layers, num_encoder_layers, mode, norm=True
-        )
-        self.decoder = Decoder(
-            d_model, nhead, dim_feedforward, dropout, activation,
-            num_unique_decoder_layers, num_decoder_layers, mode, norm=True
-        )
+        self.encoder = Encoder(input_dim, d_model, nhead, dim_feedforward, dropout, activation, 
+                               num_unique_layers, num_total_layers, mode, norm, max_token)
+        self.decoder = Decoder(output_dim, d_model, nhead, dim_feedforward, dropout, activation, 
+                               num_unique_layers, num_total_layers, mode, norm, max_token)
         self._reset_parameters()
+        self.src_pad_idx = src_pad_idx
+        self.trg_pad_idx = tgt_pad_idx
+        self.device = device
 
     def _reset_parameters(self):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, src, tgt, src_mask=None, tgt_mask=None,
-                memory_mask=None, src_key_padding_mask=None,
+    def forward(self, src, tgt, src_mask=None, tgt_mask=None, memory_mask=None, src_key_padding_mask=None, 
                 tgt_key_padding_mask=None, memory_key_padding_mask=None):
-
+        # print(f"src_shape in Transformer: {src.shape}") # (bs, seq_len)
+        # print(f"tgt_shape in Transformer: {tgt.shape}") # (bs, seq_len)
+        # print(f"src_mask shape in Transformer: {src_mask.shape}") # (seq_len, seq_len)
+        # print(f"src_padding_mask shape in Transformer: {src_key_padding_mask.shape}") # (bs, seq_len)
+        # print(f"tgt_mask shape in Transformer: {tgt_mask.shape}") # (seq_len, seq_len)
+        # print(f"memory_mask shape in Transformer: {memory_mask.shape}") # (tgt_seq_len, bs, src_seq_len)
         """
-        Input:
-            src (Tensor): source sequence (batch_size, src_len, d_model)
-            tgt (Tensor): target sequence (batch_size, tgt_len, d_model)
-            src_mask (Optional[Tensor]): source mask (src_len, src_len)
-            tgt_mask (Optional[Tensor]): target mask (tgt_len, tgt_len)
-            memory_mask (Optional[Tensor]): memory mask (tgt_len, src_len)
-            src_key_padding_mask (Optional[Tensor]): source padding mask (batch_size, src_len)
-            tgt_key_padding_mask (Optional[Tensor]): target padding mask (batch_size, tgt_len)
-            memory_key_padding_mask (Optional[Tensor]): memory padding mask (batch_size, src_len)
+        In the PyTorch language, 
+        the original Transformer settings are src_mask=None and memory_mask=None, 
+        and for tgt_mask=generate_square_subsequent_mask(T).
+        Again, memory_mask is used only when you don’t want to let the decoder attend certain tokens in the input sequence
+        """
+        memory = self.encoder(src, src_key_padding_mask=src_key_padding_mask) # (seq_len, bs, d_model)
+        # print(f"encoder output memory shape in Transformer: {memory.shape}") 
         
-        Output:
-            Tensor: output sequence (batch_size, tgt_len, d_model)
-        """
-        memory = self.encoder(src, mask=src_mask, src_key_padding_mask=src_key_padding_mask)
-        output = self.decoder(tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
-                              tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=memory_key_padding_mask)
+        # teacher forcing: use the original tgt data, allow the model to predict the "next" token  
+        # batch_first=True (bs, seq_len, d_model) needed 
+        
+        output = self.decoder(tgt, memory.transpose(0,1))
+        # output = self.decoder(tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
+        #                       tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=src_key_padding_mask)
         return output
+
