@@ -17,6 +17,9 @@ class InverseSqrtScheduler:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
         return lr
+    
+    def get_last_lr(self):
+        return [param_group['lr'] for param_group in self.optimizer.param_groups]
 
 
 class LabelSmoothingLoss(nn.Module):

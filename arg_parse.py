@@ -23,7 +23,8 @@ def train_arg():
     parser.add_argument("--criterion", type=str, default="label_smoothed_cross_entropy")
     parser.add_argument("--label-smoothing", type=float, default=0.1)
     parser.add_argument("--max-tokens", type=int, default=3584)
-    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--save_interval", type=int, default=1)
+    parser.add_argument("--save_dir", type=str)
 
     args = parser.parse_args()
 

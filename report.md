@@ -41,7 +41,7 @@ Daye Lee
     - encoder & decoder with M sharing layers, made the total of N layers, which is implemented in the `model/ParameterShareTransformer.py`
     - `train.py`
     - experiments setting 
-      - GPU 4, epoch 1000, 
+      - GPU 4, epoch 1000, 2 hours per 1 epoch 
   - Hyperparameter setting 
     - epoch, ,,,,
     
