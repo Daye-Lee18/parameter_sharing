@@ -25,6 +25,14 @@ def train_arg():
     parser.add_argument("--max-tokens", type=int, default=3584)
     parser.add_argument("--save_interval", type=int, default=1)
     parser.add_argument("--save_dir", type=str)
+    parser.add_argument("--num_workers", type=int, default=8)
+
+    # resuming the training 
+    parser.add_argument("--resume", type=str, default="")
+    parser.add_argument("--checkpoint_path", type=str, default="")
+    parser.add_argument("--wandb_pj_name", type=str, default="")
+    parser.add_argument("--exp_name", type=str, default="")
+
 
     args = parser.parse_args()
 

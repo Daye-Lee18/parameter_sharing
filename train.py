@@ -12,7 +12,10 @@ import os
 import sentencepiece as spm
 from data.dataloader import get_dataloader
 from torch.utils.data import DataLoader
+
+# util
 from accelerate import Accelerator
+import wandb 
 
 def main(args):
     
@@ -21,17 +24,17 @@ def main(args):
     data_dir = args.data
 
     # Build a dataset and dataloader 
-    train_loader = get_dataloader(data_dir, 'en', 'de', 'train', args.batch_size)
+    train_loader = get_dataloader(data_dir, 'en', 'de', 'train', args.batch_size, num_workers=args.num_workers)
     if accelerator.is_main_process:
         print(f"Loaded Training dataset")
-
+        
     # Initialize device
     device = accelerator.device
 
     # Initialize model
     model = ParameterShareTransformer(args.input_dim, args.output_dim, args.src_pad_idx, args.tgt_pad_idx, args.max_tokens, device)
 
-    # Initialize optimizer, criterion, scheduler, and scaler
+    # Initialize optimizer, criterion, scheduler
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=eval(args.adam_betas), weight_decay=args.weight_decay)
     criterion = LabelSmoothingLoss(smoothing=args.label_smoothing).to(device)
     scheduler = InverseSqrtScheduler(optimizer, args.warmup_updates, args.warmup_init_lr, args.lr)
@@ -42,12 +45,45 @@ def main(args):
     # Prepare dataloader, model, and optimizer with accelerator
     train_loader, model, optimizer = accelerator.prepare(train_loader, model, optimizer)
 
+    # Load the checkpoint model 
+    accelerator.wait_for_everyone()
+    if args.checkpoint_path and args.resume == "must":  # resuming a training 
+        unwrapped_model = accelerator.unwrap_model(model)
+        checkpoint = torch.load(args.checkpoint_path, map_location=device)
+        unwrapped_model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"]
+        start_loss = checkpoint["loss"]
+    else:
+        start_epoch = 0
+        start_loss = 0
+
     # Training
     model.train()
-    num_epochs = args.epochs
-    for epoch in range(num_epochs):
-        total_loss = 0
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}")
+    for epoch in range(start_epoch, args.epochs):
+        total_loss = start_loss
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}", disable=not accelerator.is_main_process)
+        
+        if accelerator.is_main_process:
+            if not args.resume:
+                wandb_id = wandb.util.generate_id()
+                config = {
+                    "epochs": epoch,
+                    "batch_size": args.batch_size,
+                    "wandb_id": wandb_id
+                }
+                wandb.init(id=wandb_id, project=args.wandb_pj_name, name=args.exp_name, save_code=True, config=config, resume="allow")
+            else:
+                wandb_id = args.wandb_id
+                resume = args.resume
+                config = {
+                    "epochs": epoch,
+                    "batch_size": args.batch_size,
+                    "wandb_id": wandb_id
+                }
+                wandb.init(id=wandb_id, project=args.wandb_pj_name, name=args.exp_name, save_code=True, config=config, resume=resume)
+        
         for batch in progress_bar:
             with accelerator.accumulate(model):
                 src_batch, tgt_batch = batch
@@ -81,9 +117,7 @@ def main(args):
                 optimizer.step()
                 scheduler.step()
                 total_loss += loss.item()
-            # if accelerator.is_main_process: 
-            #     progress_bar.set_postfix({"Loss": loss.item(), "LR": scheduler.get_last_lr()})
-        
+
         if accelerator.is_main_process:
             print(f"Epoch: {epoch + 1}, Loss: {total_loss / len(train_loader)}")
 
@@ -91,10 +125,32 @@ def main(args):
         if epoch % args.save_interval == 0:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
-                unwrapped_model = accelerator.unwrap_model(model)
-                
+                model.eval()
+                ckpt = {
+                    "model_state_dict": accelerator.unwrap_model(model).state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "epoch": epoch,
+                    "loss": loss
+                }
                 checkpoint_fname = os.path.join(args.save_dir, f"epoch_{epoch+1}_bs_{args.batch_size}.pt")
-                accelerator.save(unwrapped_model.state_dict(), checkpoint_fname)
+                accelerator.save(ckpt, checkpoint_fname)
+                print(f"[MODEL SAVED at Epoch {epoch+1}]")
+
+    if accelerator.is_main_process:
+        model.eval()
+        ckpt = {
+            "model_state_dict": accelerator.unwrap_model(model).state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch,
+            "loss": loss
+        }
+        checkpoint_fname = os.path.join(args.save_dir, "last.pt")
+        accelerator.save(ckpt, checkpoint_fname)
+        print(f"[MODEL SAVED at End of Training]")
+
+        wandb.run.finish()
 
 if __name__ == '__main__':
     args = train_arg()

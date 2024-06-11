@@ -7,3 +7,5 @@
 */__pycache__/
 *.bpe
 *.json
+settings
+wandb/*

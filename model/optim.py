@@ -21,7 +21,20 @@ class InverseSqrtScheduler:
     def get_last_lr(self):
         return [param_group['lr'] for param_group in self.optimizer.param_groups]
 
+    def state_dict(self):
+        return {
+            'warmup_updates': self.warmup_updates,
+            'warmup_init_lr': self.warmup_init_lr,
+            'peak_lr': self.peak_lr,
+            'update_step': self.update_step
+        }
 
+    def load_state_dict(self, state_dict):
+        self.warmup_updates = state_dict['warmup_updates']
+        self.warmup_init_lr = state_dict['warmup_init_lr']
+        self.peak_lr = state_dict['peak_lr']
+        self.update_step = state_dict['update_step']
+        
 class LabelSmoothingLoss(nn.Module):
     def __init__(self, smoothing=0.1):
         super(LabelSmoothingLoss, self).__init__()
