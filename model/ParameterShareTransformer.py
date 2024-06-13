@@ -25,9 +25,6 @@ class Encoder(nn.TransformerEncoder):
         quotient, remainder = divmod(num_total_layers, num_unique_layers)
         assert remainder == 0 
 
-        if mode == "cycle_rev":
-            assert quotient == 2
-
         encoder_layer = nn.TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation, batch_first=True
         )
@@ -91,18 +88,37 @@ class Encoder(nn.TransformerEncoder):
 
         x = self.dropout((self.tok_embedding(original_x) * self.scale) + self.pos_embedding(x_pos))
         
+        cnt = 0 
         for enc_i in range(self.N):
-            if self.mode == "sequence":
-                enc_i = enc_i // (self.N // self.M)
+            if enc_i == 0:
+                enc_i = cnt
+            elif self.mode == "sequence":
+                if (enc_i) % math.floor(self.N/self.M) == 0:
+                    cnt += 1 
+                    enc_i = cnt
+                else:
+                    enc_i = cnt
             elif self.mode == "cycle":
-                enc_i = enc_i % self.M
-            elif enc_i > (self.N - 1) / 2:
-                enc_i = self.N - enc_i - 1
+                if enc_i < self.M: 
+                    cnt += 1
+                    enc_i = cnt
+                else:
+                    enc_i = ((enc_i) % self.M )
+            elif self.mode == "cycle_rev":
+                if enc_i < self.M:
+                    cnt += 1 
+                    enc_i = cnt
+                elif (enc_i) < self.M * (round(self.N/self.M,0)-1):
+                    enc_i = ((enc_i)% self.M)
+                else:
+                    enc_i = self.M - ((enc_i)%self.M) -1
+            else:
+                assert self.mode == "sequence" or self.mode == "cycle" or self.mode == "cycle_rev"
             if verbose:
                 print(f"layer {enc_i}")
 
-
             x = self.layers[enc_i](x)
+            
 
         if self.norm is not None:
             x = self.norm(x)
@@ -129,8 +145,6 @@ class Decoder(nn.TransformerDecoder):
         quotient, remainder = divmod(num_total_layers, num_unique_layers)
         assert remainder == 0
 
-        if mode == "cycle_rev":
-            assert quotient == 2
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation, batch_first=True
@@ -143,7 +157,7 @@ class Decoder(nn.TransformerDecoder):
         self.norm = nn.LayerNorm(d_model) if norm else None
         self.tok_embedding = nn.Embedding(output_dim, d_model)
         self.pos_embedding = nn.Embedding(max_token, d_model)
-        self.fc_out = nn.Linear(d_model, output_dim)
+        self.fc_out1 = nn.Linear(d_model, output_dim)
         self.dropout = nn.Dropout(dropout)
         self.scale = torch.sqrt(torch.FloatTensor([d_model])).to(torch.device("cpu"))
 
@@ -181,13 +195,32 @@ class Decoder(nn.TransformerDecoder):
 
         tgt = self.dropout((self.tok_embedding(tgt) * self.scale) + self.pos_embedding(tgt_pos))
         
+        cnt = 0 
         for dec_i in range(self.N):
-            if self.mode == "sequence":
-                dec_i = dec_i // (self.N // self.M)
+            if dec_i == 0:
+                dec_i = cnt
+            elif self.mode == "sequence":
+                if (dec_i) % math.floor(self.N/self.M) == 0:
+                    cnt += 1 
+                    dec_i = cnt
+                else:
+                    dec_i = cnt
             elif self.mode == "cycle":
-                dec_i = dec_i % self.M
-            elif dec_i > (self.N - 1) / 2:
-                dec_i = self.N - dec_i - 1
+                if dec_i < self.M: 
+                    cnt += 1
+                    dec_i = cnt
+                else:
+                    dec_i = ((dec_i) % self.M )
+            elif self.mode == "cycle_rev":
+                if dec_i < self.M:
+                    cnt += 1 
+                    dec_i = cnt
+                elif (dec_i) < self.M * (round(self.N/self.M,0)-1):
+                    dec_i = ((dec_i)% self.M)
+                else:
+                    dec_i = self.M - ((dec_i)%self.M) -1
+            else:
+                assert self.mode == "sequence" or self.mode == "cycle" or self.mode == "cycle_rev"
             if verbose:
                 print(f"layer {dec_i}")
 
@@ -197,13 +230,13 @@ class Decoder(nn.TransformerDecoder):
             tgt = self.norm(tgt)
 
         tgt = tgt.transpose(0, 1)  # Change back to (batch_size, tgt_len, d_model)
-        output = self.fc_out(tgt)
+        output = self.fc_out1(tgt)
+      
         return output
 
 class ParameterShareTransformer(nn.Module):
-    def __init__(self, input_dim, output_dim, src_pad_idx, tgt_pad_idx, max_token, device, d_model=512, nhead=16, 
-                 dim_feedforward=2048, dropout=0.1, activation="relu", num_unique_layers=3, num_total_layers=6, 
-                 mode="cycle_rev", norm=False):
+    def __init__(self, input_dim, output_dim, src_pad_idx, tgt_pad_idx, max_token, device, mode, num_unique_layers,  num_total_layers, 
+                d_model=256, nhead=16, dim_feedforward=1024, dropout=0.1, activation="relu", norm=False):
         super().__init__()
         self.encoder = Encoder(input_dim, d_model, nhead, dim_feedforward, dropout, activation, 
                                num_unique_layers, num_total_layers, mode, norm, max_token)
@@ -233,13 +266,13 @@ class ParameterShareTransformer(nn.Module):
         and for tgt_mask=generate_square_subsequent_mask(T).
         Again, memory_mask is used only when you don’t want to let the decoder attend certain tokens in the input sequence
         """
-        memory = self.encoder(src, src_key_padding_mask=src_key_padding_mask) # (seq_len, bs, d_model)
+        memory = self.encoder(src, src_key_padding_mask=src_key_padding_mask, verbose=False) # (seq_len, bs, d_model)
         # print(f"encoder output memory shape in Transformer: {memory.shape}") 
         
         # teacher forcing: use the original tgt data, allow the model to predict the "next" token  
         # batch_first=True (bs, seq_len, d_model) needed 
         
-        output = self.decoder(tgt, memory.transpose(0,1))
+        output = self.decoder(tgt, memory.transpose(0,1), verbose=False)
         # output = self.decoder(tgt, memory, tgt_mask=tgt_mask, memory_mask=memory_mask,
         #                       tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=src_key_padding_mask)
         return output

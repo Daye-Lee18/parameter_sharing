@@ -9,7 +9,6 @@ from model.ParameterShareTransformer import ParameterShareTransformer
 from tqdm import tqdm
 from model.optim import InverseSqrtScheduler, LabelSmoothingLoss
 import os
-import sentencepiece as spm
 from data.dataloader import get_dataloader
 from torch.utils.data import DataLoader
 
@@ -32,7 +31,8 @@ def main(args):
     device = accelerator.device
 
     # Initialize model
-    model = ParameterShareTransformer(args.input_dim, args.output_dim, args.src_pad_idx, args.tgt_pad_idx, args.max_tokens, device)
+    model = ParameterShareTransformer(args.input_dim, args.output_dim, args.src_pad_idx, args.tgt_pad_idx, args.max_tokens, device, args.mode, args.M, args.N,
+                                    args.d_model, args.nhead, args.dim_feedforward, args.dropout)
 
     # Initialize optimizer, criterion, scheduler
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=eval(args.adam_betas), weight_decay=args.weight_decay)
@@ -47,7 +47,7 @@ def main(args):
 
     # Load the checkpoint model 
     accelerator.wait_for_everyone()
-    if args.checkpoint_path and args.resume == "must":  # resuming a training 
+    if args.checkpoint_path != "" and args.resume == "must":  # resuming a training 
         unwrapped_model = accelerator.unwrap_model(model)
         checkpoint = torch.load(args.checkpoint_path, map_location=device)
         unwrapped_model.load_state_dict(checkpoint["model_state_dict"])
@@ -66,7 +66,7 @@ def main(args):
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}", disable=not accelerator.is_main_process)
         
         if accelerator.is_main_process:
-            if not args.resume:
+            if args.resume == "":
                 wandb_id = wandb.util.generate_id()
                 config = {
                     "epochs": epoch,
@@ -74,7 +74,7 @@ def main(args):
                     "wandb_id": wandb_id
                 }
                 wandb.init(id=wandb_id, project=args.wandb_pj_name, name=args.exp_name, save_code=True, config=config, resume="allow")
-            else:
+            else: # args.resume == "must"
                 wandb_id = args.wandb_id
                 resume = args.resume
                 config = {
@@ -102,6 +102,7 @@ def main(args):
                 src_mask, tgt_mask, src_padding_mask, tgt_padding_mask, memory_mask = create_mask(src_batch, tgt_input, args.tgt_pad_idx)
 
                 optimizer.zero_grad()
+
                 with accelerator.autocast():
                     src_batch = src_batch.reshape(args.batch_size, -1)
                     tgt_input = tgt_input.reshape(args.batch_size, -1)
@@ -109,7 +110,9 @@ def main(args):
                     output = model(src_batch, tgt_input, src_mask, tgt_mask, memory_mask, src_padding_mask, tgt_padding_mask)
                     tgt_out = tgt_batch[1:, :]
                     loss = criterion(output.view(-1, output.shape[-1]), tgt_out.view(-1))
-
+                    
+                    accelerator.wait_for_everyone()
+                    wandb.log({"Train_loss": loss}) # for every iteration 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_value_(model.parameters(), args.clip_norm)
@@ -133,7 +136,10 @@ def main(args):
                     "epoch": epoch,
                     "loss": loss
                 }
-                checkpoint_fname = os.path.join(args.save_dir, f"epoch_{epoch+1}_bs_{args.batch_size}.pt")
+                checkpoint_dir_name = os.path.join(args.save_dir, args.mode, args.exp_name)
+                if not os.path.exists(checkpoint_dir_name):
+                    os.makedirs(checkpoint_dir_name)
+                checkpoint_fname = os.path.join(checkpoint_dir_name, f"epoch_{epoch+1}_bs_{args.batch_size}.pt")
                 accelerator.save(ckpt, checkpoint_fname)
                 print(f"[MODEL SAVED at Epoch {epoch+1}]")
 
@@ -146,9 +152,12 @@ def main(args):
             "epoch": epoch,
             "loss": loss
         }
-        checkpoint_fname = os.path.join(args.save_dir, "last.pt")
+        checkpoint_dir_name = os.path.join(args.save_dir, args.mode, args.exp_name)
+        if not os.path.exists(checkpoint_dir_name):
+            os.makedirs(checkpoint_dir_name)
+        checkpoint_fname = os.path.join(checkpoint_dir_name, "last.pt")
         accelerator.save(ckpt, checkpoint_fname)
-        print(f"[MODEL SAVED at End of Training]")
+        print(f"[last MODEL SAVED at every epoch]")
 
         wandb.run.finish()
 
