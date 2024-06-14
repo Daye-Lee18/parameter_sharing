@@ -13,17 +13,29 @@ from data.dataloader import get_dataloader
 from torch.utils.data import DataLoader
 
 # util
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate.state import AcceleratorState
 import wandb 
 
+def print_gpu_memory():
+    for i in range(torch.cuda.device_count()):
+        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"  Memory Allocated: {torch.cuda.memory_allocated(i) / 1024 ** 3:.2f} GB")
+        print(f"  Memory Cached: {torch.cuda.memory_reserved(i) / 1024 ** 3:.2f} GB")
+
 def main(args):
-    
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], gradient_accumulation_steps=2, mixed_precision="fp16")
+    state = AcceleratorState()
+    num_processes = state.num_processes
+
     # Helpful for memory limitation, train on larger batch sizes by accumulating the gradients over multiple batches before updating the weights.
-    accelerator = Accelerator(gradient_accumulation_steps=2, mixed_precision="fp16")
+    # accelerator = Accelerator()
     data_dir = args.data
 
     # Build a dataset and dataloader 
     train_loader = get_dataloader(data_dir, 'en', 'de', 'train', args.batch_size, num_workers=args.num_workers)
+
     if accelerator.is_main_process:
         print(f"Loaded Training dataset")
         
@@ -83,7 +95,7 @@ def main(args):
                     "wandb_id": wandb_id
                 }
                 wandb.init(id=wandb_id, project=args.wandb_pj_name, name=args.exp_name, save_code=True, config=config, resume=resume)
-        
+                    
         for batch in progress_bar:
             with accelerator.accumulate(model):
                 src_batch, tgt_batch = batch
@@ -111,8 +123,8 @@ def main(args):
                     tgt_out = tgt_batch[1:, :]
                     loss = criterion(output.view(-1, output.shape[-1]), tgt_out.view(-1))
                     
-                    accelerator.wait_for_everyone()
-                    wandb.log({"Train_loss": loss}) # for every iteration 
+                    if accelerator.is_main_process:
+                        wandb.log({"Train_loss": loss}) # for every iteration 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_value_(model.parameters(), args.clip_norm)
@@ -120,6 +132,8 @@ def main(args):
                 optimizer.step()
                 scheduler.step()
                 total_loss += loss.item()
+
+                torch.cuda.empty_cache()
 
         if accelerator.is_main_process:
             print(f"Epoch: {epoch + 1}, Loss: {total_loss / len(train_loader)}")

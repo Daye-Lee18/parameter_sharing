@@ -5,7 +5,7 @@ import torch.nn as nn
 # TransformerEncoder(), ,,, code 참고 
 import torch
 import torch.nn as nn
-
+import math
 class Encoder(nn.TransformerEncoder):
     def __init__(
         self,
