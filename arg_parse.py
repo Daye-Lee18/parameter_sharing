@@ -2,6 +2,8 @@ import argparse
 
 def train_arg():
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--val_interval", type=int, default=10)
     parser.add_argument("--mode", type=str, default="cycle_rev")
     parser.add_argument("--input_dim", type=int, default=32000)
     parser.add_argument("--output_dim", type=int, default=32000)
